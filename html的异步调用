@@ -1,0 +1,160 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Collections;
+using System.Net;
+using System.IO;
+using System.Threading;
+using System.Diagnostics;
+
+namespace eLive.Common
+{
+    public class RequestState
+    {
+        //存储请求状态 
+        const int BUFFER_SIZE = 1024;
+        public StringBuilder requestData;
+        public byte[] BufferRead;
+        public HttpWebRequest request;
+        public HttpWebResponse response;
+        public Stream streamResponse;
+        public RequestState()
+        {
+            BufferRead = new byte[BUFFER_SIZE];
+            requestData = new StringBuilder("");
+            request = null;
+            streamResponse = null;
+        }
+    }
+
+    public interface IAsyncHttpSink
+    {
+        void OnReadComplete(string strHtml);
+        void OnReadTimeOut();
+        void OnReadError();
+    }
+
+    public class AsynHttpRequest
+    {
+        public AsynHttpRequest(IAsyncHttpSink pSink)
+        {
+            _pSink = pSink;
+            _strEncoding = "";
+        }
+
+        public void StartRequest(string strUrl)
+        {
+            try
+            {
+                _strEncoding = "";
+                HttpWebRequest myHttpWebRequest = (HttpWebRequest)WebRequest.Create(strUrl);
+
+                RequestState myRequestState = new RequestState();
+                myRequestState.request = myHttpWebRequest;
+
+                IAsyncResult result =
+                    (IAsyncResult)myHttpWebRequest.BeginGetResponse(new AsyncCallback(RespCallback), myRequestState);
+
+                //处理超时请求
+                ThreadPool.RegisterWaitForSingleObject(result.AsyncWaitHandle, new WaitOrTimerCallback(TimeoutCallback), myHttpWebRequest, DefaultTimeout, true);
+
+            }
+            catch (WebException e)
+            {
+                InfoTransferHandler.Instance.ShowMsgBox(e.Message.ToString());
+            }
+        }
+
+        //超时，终止请求   
+        private void TimeoutCallback(object state, bool bTimeOut)
+        {
+            if (bTimeOut)
+            {
+                HttpWebRequest request = state as HttpWebRequest;
+                if (request != null)
+                {
+                    request.Abort();
+                }
+
+                if(_pSink != null)
+                {
+                    _pSink.OnReadTimeOut();
+                }
+            }
+        }
+
+        private void RespCallback(IAsyncResult asynchronousResult)
+        {
+            try
+            {
+                //异步状态请求  
+                RequestState myRequestState = (RequestState)asynchronousResult.AsyncState;
+                HttpWebRequest myHttpWebRequest = myRequestState.request;
+                myRequestState.response = (HttpWebResponse)myHttpWebRequest.EndGetResponse(asynchronousResult);
+
+                //把请求读入流对象   
+                Stream responseStream = myRequestState.response.GetResponseStream();
+                myRequestState.streamResponse = responseStream;
+
+                //读取Html源文件并显示到控制台
+                IAsyncResult asynchronousInputRead = responseStream.BeginRead(myRequestState.BufferRead, 0, BUFFER_SIZE, new AsyncCallback(ReadCallBack), myRequestState);
+                return;
+            }
+            catch (WebException e)
+            {
+                InfoTransferHandler.Instance.ShowMsgBox("异步读取文件RespCallback失败：" + e.Message);
+            }
+        }
+
+        private void ReadCallBack(IAsyncResult asyncResult)
+        {
+            RequestState myRequestState = (RequestState)asyncResult.AsyncState;
+            Stream responseStream = myRequestState.streamResponse;
+            int read = responseStream.EndRead(asyncResult);
+            try
+            {
+                //读取Html源文件
+                if (read > 0)
+                {
+                    string strBuffer = "";
+                    if(_strEncoding == "")
+                    {
+                        _strEncoding =  UtilCoding.DetectEncoding_Bytes(myRequestState.BufferRead).ToString();
+                    }
+                    
+                    strBuffer = Encoding.GetEncoding(_strEncoding).GetString(myRequestState.BufferRead);
+                    myRequestState.requestData.Append(strBuffer);
+                    IAsyncResult asynchronousResult = responseStream.BeginRead(myRequestState.BufferRead, 0, BUFFER_SIZE, new AsyncCallback(ReadCallBack), myRequestState);
+                    return;
+                }
+                else
+                {
+                   //读取完成
+                    responseStream.Close();
+                    if(_pSink != null)
+                    {
+                        _pSink.OnReadComplete(myRequestState.requestData.ToString());
+                    }
+                }
+     
+            }
+            catch (Exception e)
+            {
+                InfoTransferHandler.Instance.ShowCommonMsg("异步读取文件ReadCallBack失败：" + e.Message);
+                responseStream.Close();
+                if (_pSink != null)
+                {
+                    _pSink.OnReadComplete(myRequestState.requestData.ToString());
+                }
+            }
+          
+        }
+
+        private IAsyncHttpSink _pSink;
+        const int BUFFER_SIZE = 1024;
+        const int DefaultTimeout = 2 * 60 * 1000; //2分钟超时
+        private string _strEncoding;
+    }
+
+    
+}
